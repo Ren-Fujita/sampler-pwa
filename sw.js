@@ -1,68 +1,85 @@
 'use strict';
-// Bump the cache version whenever the app shell changes.
-const CACHE_PREFIX = 'sx12-app-shell-' + encodeURIComponent(new URL(self.registration.scope).pathname) + '-';
-const CACHE_NAME = CACHE_PREFIX + '2026-10-15-v1';
+// Change this version whenever any shell file changes.
+const SCOPE_URL = new URL(self.registration.scope);
+const CACHE_PREFIX = 'sx12-app-shell-' + encodeURIComponent(SCOPE_URL.pathname) + '-';
+const CACHE_NAME = CACHE_PREFIX + '2026-10-15-v3-refactor';
 const SHELL = [
-  './index.html', './pwa.js', './manifest.webmanifest',
+  './index.html', './styles.css', './pwa.js', './manifest.webmanifest',
+  './js/app.js', './js/config.js', './js/sample.js', './js/presets.js',
+  './js/session.js', './js/session-storage.js', './js/backup-codec.js',
+  './js/audio-utils.js', './js/waveform.js',
   './icons/apple-touch-icon.png', './icons/icon-192.png',
   './icons/icon-512.png', './icons/icon-maskable-512.png'
-].map(path => new URL(path, self.registration.scope).href);
+].map(path => new URL(path, SCOPE_URL).href);
+const SHELL_URLS = new Set(SHELL);
 const INDEX_URL = SHELL[0];
-const SCOPE_URL = new URL(self.registration.scope);
 
-self.addEventListener('install', event => {
-  event.waitUntil((async () => {
-    // Reject login redirects or HTML substituted for JS/icons, rather than
-    // caching a broken shell. Samples and settings live separately in IndexedDB.
-    const responses = await Promise.all(SHELL.map(async url => {
-      const response = await fetch(new Request(url, { cache: 'reload', credentials: 'same-origin' }));
-      const type = response.headers.get('content-type') || '';
-      const validType = url.endsWith('.html') ? type.includes('text/html')
-        : url.endsWith('.js') ? /javascript/.test(type)
-        : url.endsWith('.png') ? type.includes('image/png')
-        : /json|manifest/.test(type);
-      if (!response.ok || response.redirected || !validType)throw Error('App shell unavailable: ' + url);
-      return response;
-    }));
-    const cache = await caches.open(CACHE_NAME);
-    await Promise.all(SHELL.map((url, i) => cache.put(url, responses[i])));
-    // A new version waits until the user explicitly chooses to apply it.
-  })());
-});
+function expectedContentType(url, type) {
+  if (url.endsWith('.html'))return type.includes('text/html');
+  if (url.endsWith('.css'))return type.includes('text/css');
+  if (url.endsWith('.js'))return /javascript/.test(type);
+  if (url.endsWith('.png'))return type.includes('image/png');
+  return /json|manifest/.test(type);
+}
 
-self.addEventListener('activate', event => {
-  event.waitUntil((async () => {
-    // Only our own shell caches are removed; sample data is never cleared.
-    const names = await caches.keys();
-    await Promise.all(names.filter(name => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME).map(name => caches.delete(name)));
-    await self.clients.claim();
-  })());
-});
+async function loadShellResponse(url) {
+  const request = new Request(url, { cache: 'reload', credentials: 'same-origin' });
+  const response = await fetch(request);
+  const type = response.headers.get('content-type') || '';
+  if (!response.ok || response.redirected || !expectedContentType(url, type)) {
+    throw Error('App shell unavailable: ' + url);
+  }
+  return response;
+}
 
-self.addEventListener('fetch', event => {
-  const request = event.request;
-  if (request.method !== 'GET')return;
+async function installShell() {
+  // Validate every response before writing the new shell. Login pages must fail.
+  const responses = await Promise.all(SHELL.map(loadShellResponse));
+  const cache = await caches.open(CACHE_NAME);
+  await Promise.all(SHELL.map((url, index) => cache.put(url, responses[index])));
+  // Wait for an explicit update action while an older version is still open.
+}
+
+async function activateShell() {
+  const names = await caches.keys();
+  await Promise.all(names
+    .filter(name => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
+    .map(name => caches.delete(name)));
+  // Sample data is stored in IndexedDB, separate from these shell caches.
+  await self.clients.claim();
+}
+
+function shellKey(request) {
+  if (request.method !== 'GET')return null;
   const url = new URL(request.url);
-  if (url.origin !== SCOPE_URL.origin)return;
+  if (url.origin !== SCOPE_URL.origin)return null;
   url.search = '';
   url.hash = '';
-  const canonical = url.href;
-  const isAppNavigation = request.mode === 'navigate' && (canonical === SCOPE_URL.href || canonical === INDEX_URL);
-  if (!isAppNavigation && !SHELL.includes(canonical))return;
-  // Every controlled client uses one complete shell version until activation.
-  event.respondWith((async () => {
-    const cache = await caches.open(CACHE_NAME);
-    return await cache.match(isAppNavigation ? INDEX_URL : canonical) || fetch(request);
-  })());
-});
+  const appNavigation = request.mode === 'navigate' && (url.href === SCOPE_URL.href || url.href === INDEX_URL);
+  if (appNavigation)return INDEX_URL;
+  return SHELL_URLS.has(url.href) ? url.href : null;
+}
 
+async function cachedShellResponse(key, request) {
+  const cache = await caches.open(CACHE_NAME);
+  return await cache.match(key) || fetch(request);
+}
+
+async function reportOfflineReadiness(port) {
+  const cache = await caches.open(CACHE_NAME);
+  const entries = await Promise.all(SHELL.map(url => cache.match(url)));
+  port.postMessage({ ready: entries.every(Boolean) });
+}
+
+self.addEventListener('install', event => event.waitUntil(installShell()));
+self.addEventListener('activate', event => event.waitUntil(activateShell()));
+self.addEventListener('fetch', event => {
+  const key = shellKey(event.request);
+  if (key)event.respondWith(cachedShellResponse(key, event.request));
+});
 self.addEventListener('message', event => {
   if (event.data?.type === 'SKIP_WAITING')event.waitUntil(self.skipWaiting());
   if (event.data?.type === 'CHECK_OFFLINE' && event.ports[0]) {
-    event.waitUntil((async () => {
-      const cache = await caches.open(CACHE_NAME);
-      const entries = await Promise.all(SHELL.map(url => cache.match(url)));
-      event.ports[0].postMessage({ ready: entries.every(Boolean) });
-    })());
+    event.waitUntil(reportOfflineReadiness(event.ports[0]));
   }
 });

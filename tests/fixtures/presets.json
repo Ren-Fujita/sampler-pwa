@@ -1,0 +1,74 @@
+[
+  {
+    "name": "Kick / warm",
+    "rate": 44100,
+    "frames": 24256,
+    "sha256": "6ee89e5008b51f8b7500338d69733c335c14acfb2e8c435d6479f42c3f774d2c"
+  },
+  {
+    "name": "Snare / dusty",
+    "rate": 44100,
+    "frames": 15876,
+    "sha256": "2f98a1ad085e02d2a1c4343f16a2d72093feed2a3cca6a96701917a78bd2a2d6"
+  },
+  {
+    "name": "Hi-hat / closed",
+    "rate": 44100,
+    "frames": 5292,
+    "sha256": "b455a0ee4b63198c6d7e1c0fa56b62b658e71f988aa84808e52916bb47edc6da"
+  },
+  {
+    "name": "Hi-hat / open",
+    "rate": 44100,
+    "frames": 24256,
+    "sha256": "552b36bb7c80e25395cb119b71c3914e282be5aea3f33f2672952ea75a543a98"
+  },
+  {
+    "name": "Rim / dry",
+    "rate": 44100,
+    "frames": 8820,
+    "sha256": "8669e1001076a69182cda0da6f815ac8c70ab29e6b37f503a1c9078fcb3e6540"
+  },
+  {
+    "name": "Tom / low",
+    "rate": 44100,
+    "frames": 24256,
+    "sha256": "3eb962c6bb3eaa836b309990c2e39cf6b58e7ad993ef76297586cc6b05bec183"
+  },
+  {
+    "name": "Clap / room",
+    "rate": 44100,
+    "frames": 13230,
+    "sha256": "7af193e449ef2a6f9d5ce842f35df30a2f93e44c758fa75902469e44b3e536f1"
+  },
+  {
+    "name": "Shaker / tight",
+    "rate": 44100,
+    "frames": 9702,
+    "sha256": "da1098a574397353fd17e68ddc3dcfcb59d05a408de6baf2f9038afd968ab749"
+  },
+  {
+    "name": "Bass / C",
+    "rate": 44100,
+    "frames": 35280,
+    "sha256": "ef6a37f603afca9bad6d2cd35877b9c0c221f7a69b69101e800366be9cd73a3a"
+  },
+  {
+    "name": "Chord / minor",
+    "rate": 44100,
+    "frames": 74970,
+    "sha256": "8c5cd834b3c209cf8046f5ec4c9c526b835b1fef3d009b709ceb0153e97909e2"
+  },
+  {
+    "name": "Keys / soft",
+    "rate": 44100,
+    "frames": 57330,
+    "sha256": "d21fa9ad3d6b3cd5f300b07bbbf1f7b50ca6c94d39c7c07cb13e0fc9209284d4"
+  },
+  {
+    "name": "Bell / glass",
+    "rate": 44100,
+    "frames": 37485,
+    "sha256": "213f9513bac78be336da92a6d98f28cb9cdf2fb06d0c8d39e7c09bfc7619ea3c"
+  }
+]

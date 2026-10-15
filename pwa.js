@@ -1,10 +1,53 @@
-'use strict';
-(() => {
-  const status = document.getElementById('pwaStatus');
-  const updateButton = document.getElementById('checkAppUpdate');
-  const updateLabel = document.getElementById('appUpdateLabel');
-  const updateNote = document.getElementById('appUpdateNote');
-  const standalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const COPY = Object.freeze({
+  check: 'アプリの更新を確認',
+  apply: '保存して更新を適用',
+  checkNote: '再生を続けたまま確認できます',
+  applyNote: '音源と設定を保存して再起動します（再生は停止）',
+  preparing: 'オフライン起動の準備中… オンラインのままお待ちください。',
+  unavailable: 'PWAのインストールとオフライン起動には、SafariでHTTPSのURLを開いてください。',
+  installFailed: 'オフライン準備に失敗しました。通信を確認してページを開き直してください。',
+  registerFailed: 'オフライン起動を準備できませんでした。HTTPSのURLと通信状態を確認し、ページを開き直してください。'
+});
+const OFFLINE_CHECK_TIMEOUT = 4000;
+
+function isStandalone() {
+  return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+}
+
+async function requestPersistentStorage() {
+  if (!isStandalone() || !navigator.storage?.persist)return;
+  try {
+    if (!await navigator.storage.persisted())await navigator.storage.persist();
+  } catch { /* IndexedDB failures are reported by the sampler's save controls. */ }
+}
+
+function hasOfflineShell(worker) {
+  if (!worker)return Promise.resolve(false);
+  return new Promise(resolve => {
+    const channel = new MessageChannel();
+    function finish(ready) {
+      clearTimeout(timer);
+      channel.port1.close();
+      resolve(ready);
+    }
+    const timer = setTimeout(() => finish(false), OFFLINE_CHECK_TIMEOUT);
+    channel.port1.onmessage = event => finish(event.data?.ready === true);
+    try {
+      worker.postMessage({ type: 'CHECK_OFFLINE' }, [channel.port2]);
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+// The sampler supplies its save/stop operation; no application globals are exposed.
+export function initializePwa({ beforeUpdate }) {
+  const ui = {
+    status: document.getElementById('pwaStatus'),
+    button: document.getElementById('checkAppUpdate'),
+    label: document.getElementById('appUpdateLabel'),
+    note: document.getElementById('appUpdateNote')
+  };
   let registration;
   let offlineReady = false;
   let applyingUpdate = false;
@@ -12,84 +55,85 @@
 
   function renderStatus() {
     if (!registration)return;
-    status.textContent = offlineReady
-      ? (navigator.onLine ? 'オフライン準備済み' : 'オフラインで利用中') + (standalone() ? ' · ホーム画面のアプリ' : ' · ホーム画面に追加できます')
-      : 'オフライン起動の準備中… オンラインのままお待ちください。';
+    const connection = navigator.onLine ? 'オフライン準備済み' : 'オフラインで利用中';
+    const launch = isStandalone() ? ' · ホーム画面のアプリ' : ' · ホーム画面に追加できます';
+    ui.status.textContent = offlineReady ? connection + launch : COPY.preparing;
   }
+
   function renderUpdate() {
-    const waiting = registration?.waiting;
-    updateLabel.textContent = waiting ? '保存して更新を適用' : 'アプリの更新を確認';
-    updateNote.textContent = waiting ? '音源と設定を保存して再起動します（再生は停止）' : '再生を続けたまま確認できます';
+    const waiting = !!registration?.waiting;
+    ui.label.textContent = waiting ? COPY.apply : COPY.check;
+    ui.note.textContent = waiting ? COPY.applyNote : COPY.checkNote;
   }
-  async function requestPersistentStorage() {
-    if (!standalone() || !navigator.storage?.persist)return;
-    try {
-      if (!await navigator.storage.persisted())await navigator.storage.persist();
-    } catch { /* The sampler's existing save-error and backup controls remain available. */ }
-  }
+
   async function inspectOfflineCache() {
-    const worker = registration?.active;
-    if (!worker)return;
-    offlineReady = await new Promise(resolve => {
-      const channel = new MessageChannel();
-      const timer = setTimeout(() => { channel.port1.close(); resolve(false); }, 4000);
-      channel.port1.onmessage = event => {
-        clearTimeout(timer);
-        channel.port1.close();
-        resolve(event.data?.ready === true);
-      };
-      worker.postMessage({ type: 'CHECK_OFFLINE' }, [channel.port2]);
-    });
+    if (!registration?.active)return;
+    offlineReady = await hasOfflineShell(registration.active);
     renderStatus();
   }
+
   function observeInstallingWorker() {
     const worker = registration.installing;
     if (!worker)return;
     worker.addEventListener('statechange', () => {
       if (worker.state === 'installed')renderUpdate();
       if (worker.state === 'activated')inspectOfflineCache();
-      if (worker.state === 'redundant' && !offlineReady)status.textContent = 'オフライン準備に失敗しました。通信を確認してページを開き直してください。';
+      if (worker.state === 'redundant' && !offlineReady)ui.status.textContent = COPY.installFailed;
     });
   }
-  updateButton.addEventListener('click', async () => {
+
+  async function applyWaitingUpdate(worker) {
+    if (!await beforeUpdate())return;
+    applyingUpdate = true;
+    ui.note.textContent = '更新を適用しています…';
+    worker.postMessage({ type: 'SKIP_WAITING' });
+  }
+
+  async function checkForUpdate() {
+    ui.note.textContent = '更新を確認しています…';
+    await registration.update();
+    renderUpdate();
+    if (!registration.waiting) {
+      ui.note.textContent = registration.installing ? '新しいバージョンを準備しています…' : '最新のバージョンです';
+    }
+    await inspectOfflineCache();
+  }
+
+  async function handleUpdateClick() {
     if (!registration || updateInFlight)return;
     updateInFlight = true;
-    updateButton.disabled = true;
+    ui.button.disabled = true;
     try {
-      if (registration.waiting) {
-        const prepared = await window.samplerBeforeUpdate?.();
-        if (!prepared)return;
-        applyingUpdate = true;
-        updateNote.textContent = '更新を適用しています…';
-        registration.waiting.postMessage({ type: 'SKIP_WAITING' });
-        return;
-      }
-      updateNote.textContent = '更新を確認しています…';
-      await registration.update();
-      renderUpdate();
-      if (!registration.waiting)updateNote.textContent = registration.installing ? '新しいバージョンを準備しています…' : '最新のバージョンです';
-      await inspectOfflineCache();
+      const worker = registration.waiting;
+      if (worker)await applyWaitingUpdate(worker);
+      else await checkForUpdate();
     } catch {
-      updateNote.textContent = '通信を確認して、もう一度お試しください。';
+      applyingUpdate = false;
+      ui.note.textContent = '通信を確認して、もう一度お試しください。';
     } finally {
       updateInFlight = false;
-      updateButton.disabled = false;
+      ui.button.disabled = false;
     }
-  });
-  if (!('serviceWorker' in navigator) || !window.isSecureContext) {
-    status.textContent = 'PWAのインストールとオフライン起動には、SafariでHTTPSのURLを開いてください。';
-    updateButton.disabled = true;
-    return;
   }
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (applyingUpdate)window.location.reload();
-    else inspectOfflineCache();
-  });
-  window.addEventListener('online', () => { renderStatus(); registration?.update().catch(() => {}); });
-  window.addEventListener('offline', renderStatus);
-  window.addEventListener('pageshow', requestPersistentStorage);
-  window.addEventListener('appinstalled', () => { renderStatus(); requestPersistentStorage(); });
-  (async () => {
+
+  function bindLifecycleEvents() {
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (applyingUpdate)window.location.reload();
+      else inspectOfflineCache();
+    });
+    window.addEventListener('online', () => {
+      renderStatus();
+      registration?.update().catch(() => {});
+    });
+    window.addEventListener('offline', renderStatus);
+    window.addEventListener('pageshow', requestPersistentStorage);
+    window.addEventListener('appinstalled', () => {
+      renderStatus();
+      requestPersistentStorage();
+    });
+  }
+
+  async function registerWorker() {
     try {
       registration = await navigator.serviceWorker.register('./sw.js', { scope: './', updateViaCache: 'none' });
       registration.addEventListener('updatefound', observeInstallingWorker);
@@ -99,8 +143,17 @@
       navigator.serviceWorker.ready.then(inspectOfflineCache).catch(() => {});
       await requestPersistentStorage();
     } catch {
-      status.textContent = 'オフライン起動を準備できませんでした。HTTPSのURLと通信状態を確認し、ページを開き直してください。';
-      updateButton.disabled = true;
+      ui.status.textContent = COPY.registerFailed;
+      ui.button.disabled = true;
     }
-  })();
-})();
+  }
+
+  ui.button.addEventListener('click', handleUpdateClick);
+  if (!('serviceWorker' in navigator) || !window.isSecureContext) {
+    ui.status.textContent = COPY.unavailable;
+    ui.button.disabled = true;
+    return Promise.resolve();
+  }
+  bindLifecycleEvents();
+  return registerWorker();
+}

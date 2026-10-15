@@ -1,0 +1,15 @@
+export const BANKS = 'ABCDEFGHIJ';
+export const KEYS = ['1', '2', '3', '4', 'q', 'w', 'e', 'r', 'a', 's', 'd', 'f'];
+export const PAD_COUNT = KEYS.length;
+export const BANK_COUNT = BANKS.length;
+export const SLOT_COUNT = PAD_COUNT * BANK_COUNT;
+export const MODES = ['play', 'import', 'edit'];
+export const PLAYBACK_FLAGS = ['gate', 'loop'];
+export const POINTER_RELEASE_EVENTS = ['pointerup', 'pointercancel', 'lostpointercapture'];
+export const STORAGE_NAME = 'sx12-local-sampler-v1';
+export const STORAGE_VERSION = 1;
+export const MAX_DURATION = 600;
+export const MAX_VOICES = 32;
+export const MAX_FILE_BYTES = 200 * 1024 * 1024;
+export const MAX_BACKUP_RAW_BYTES = 512 * 1024 * 1024;
+export const MAX_BACKUP_FILE_BYTES = 750 * 1024 * 1024;
