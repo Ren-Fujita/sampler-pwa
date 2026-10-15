@@ -1,3 +1,29 @@
+/* iOS 27 standalone top-edge blur workaround.
+   A real fixed element taller than 10px is recognized as a top bar by WebKit.
+   Clip its background to empty text so it cannot cover any sampler controls.
+   Original device investigation: https://qiita.com/na-trium-144/items/0add98a80ca2391e3f17
+   This is a rendering workaround, not a documented browser API. */
+.ios-top-edge-guard {
+  display:none
+}
+@supports (-webkit-touch-callout:none) and (-webkit-background-clip:text) {
+  @media (display-mode:standalone) {
+    .ios-top-edge-guard {
+      display:block;
+      position:fixed;
+      top:0;
+      left:0;
+      right:0;
+      height:12px;
+      z-index:2147483647;
+      pointer-events:none;
+      background-color:var(--page);
+      -webkit-background-clip:text;
+      background-clip:text
+    }
+  }
+}
+
 :root {
   color-scheme:dark;
   --page:#000000;

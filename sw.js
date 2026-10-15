@@ -2,7 +2,7 @@
 // Change this version whenever any shell file changes.
 const SCOPE_URL = new URL(self.registration.scope);
 const CACHE_PREFIX = 'sx12-app-shell-' + encodeURIComponent(SCOPE_URL.pathname) + '-';
-const CACHE_NAME = CACHE_PREFIX + '2026-10-15-v3-refactor';
+const CACHE_NAME = CACHE_PREFIX + '2026-10-15-v4-ios27-top-edge';
 const SHELL = [
   './index.html', './styles.css', './pwa.js', './manifest.webmanifest',
   './js/app.js', './js/config.js', './js/sample.js', './js/presets.js',
