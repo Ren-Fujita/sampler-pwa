@@ -2,12 +2,13 @@
 // Change this version whenever any shell file changes.
 const SCOPE_URL = new URL(self.registration.scope);
 const CACHE_PREFIX = 'sx12-app-shell-' + encodeURIComponent(SCOPE_URL.pathname) + '-';
-const CACHE_NAME = CACHE_PREFIX + '2026-10-15-v4-ios27-top-edge';
+const CACHE_NAME = CACHE_PREFIX + '2026-10-15-v5-refactor';
 const SHELL = [
   './index.html', './styles.css', './pwa.js', './manifest.webmanifest',
   './js/app.js', './js/config.js', './js/sample.js', './js/presets.js',
   './js/session.js', './js/session-storage.js', './js/backup-codec.js',
   './js/audio-utils.js', './js/waveform.js',
+  './js/autosave.js', './js/edit-transport.js', './js/voice-store.js',
   './icons/apple-touch-icon.png', './icons/icon-192.png',
   './icons/icon-512.png', './icons/icon-maskable-512.png'
 ].map(path => new URL(path, SCOPE_URL).href);

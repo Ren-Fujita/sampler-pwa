@@ -1,8 +1,11 @@
+import { createAutosave } from './autosave.js';
+import { createEditTransport } from './edit-transport.js';
+import { createVoiceStore } from './voice-store.js';
 import { BANKS, KEYS, PAD_COUNT, BANK_COUNT, SLOT_COUNT, MODES, PLAYBACK_FLAGS, POINTER_RELEASE_EVENTS, STORAGE_VERSION, MAX_DURATION, MAX_VOICES, MAX_FILE_BYTES } from './config.js';
 import { clamp, createEmptySample, soundName, audioDuration, formatTime, formatPreciseTime, clipDuration } from './sample.js';
 import { synth } from './presets.js';
 import { createEmptyPatterns, parseSessionSettings } from './session.js';
-import { openSessionDatabase, readSession, writeSession } from './session-storage.js';
+import { openSessionDatabase, readSession } from './session-storage.js';
 import { createBackupCodec, backupYield } from './backup-codec.js';
 import { createChain, configurePlaybackSession } from './audio-utils.js';
 import { getWavePeaks, drawWavePeaks } from './waveform.js';
@@ -29,17 +32,11 @@ let fxValues = [.65, .2, .6];
 // Persistence state.
 let db = null;
 let ready = false;
-let saveTimer = null;
-let saveInFlight = false;
-let savePromise = null;
-let needsSave = false;
-const dirtySounds = new Set();
-let storageFailed = false;
 
 // Web Audio state and decoded-buffer cache.
 let ctx = null;
 let chain = null;
-const voices = new Map();
+const voiceStore = createVoiceStore();
 let bufferCache = new WeakMap();
 let playEpoch = 0;
 
@@ -82,49 +79,17 @@ function snapshot(){
     }) => meta)
   }
 }
-function markSave(soundIndex){
-  if (soundIndex !== undefined)dirtySounds.add(soundIndex);
-  needsSave = true;
-  if (!ready)return;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(flushSave, 220)
-}
-async function flushSave(){
-  if (savePromise){
-    await savePromise;
-    if (needsSave && !storageFailed)return flushSave();
-    return
-  }
-  if (!db){
-    if (ready)setSaveError();
-    return
-  }
-  if (!needsSave)return;
-  saveInFlight = true;
-  needsSave = false;
-  const changed = [...dirtySounds];
-  dirtySounds.clear();
-  savePromise = (async() => {
-    try{
-      await writeSession(db, snapshot(), pads, changed);
-      storageFailed = false;
-    }catch (e){
-      changed.forEach(i => dirtySounds.add(i));
-      needsSave = true;
-      setSaveError()
-    }finally{
-      saveInFlight = false
-    }
-  })();
-  await savePromise;
-  savePromise = null;
-  if (needsSave && !storageFailed)return flushSave();
-}
-function setSaveError(){
-  const first = !storageFailed;
-  storageFailed = true;
-  if (first)notify('ブラウザの保存領域が利用できません。メニューの「バックアップを保存」で音源を残してください。')
-}
+const autosave = createAutosave({
+  getDatabase: () => db,
+  getSettings: snapshot,
+  getSamples: () => pads,
+  isReady: () => ready,
+  onError: () => notify('ブラウザの保存領域が利用できません。メニューの「バックアップを保存」で音源を残してください。')
+});
+const markSave = autosave.mark;
+const flushSave = autosave.flush;
+const setSaveError = autosave.reportFailure;
+
 async function restore(){
   try{
     db = await openSessionDatabase();
@@ -167,34 +132,10 @@ function applySettings(s){
 }
 
 // audio.js
-// Read live voices without allocating/sorting arrays on every UI or animation update.
-function* activeVoices(index) {
-  for (const voice of voices.get(index) || []){
-    if (!voice.stopping)yield voice;
-  }
-}
-function hasActiveVoice(index) {
-  for (const voice of activeVoices(index))return true;
-  return false;
-}
-function latestActiveVoice(index) {
-  let latest = null;
-  for (const voice of activeVoices(index))latest = voice;
-  return latest;
-}
-function getVoiceActivity() {
-  let count = 0;
-  let oldest = null;
-  const activePads = new Set();
-  for (const index of voices.keys()){
-    for (const voice of activeVoices(index)){
-      count++;
-      activePads.add(index);
-      if (!oldest || voice.time < oldest.time)oldest = voice;
-    }
-  }
-  return { count, activePads, oldest };
-}
+const hasActiveVoice = voiceStore.hasActive;
+const latestActiveVoice = voiceStore.latestActive;
+const getVoiceActivity = voiceStore.activity;
+
 function updateMasterVolume(){
   if (chain)chain.master.gain.setTargetAtTime(master, ctx.currentTime, .015)
 }
@@ -241,7 +182,7 @@ async function recoverAudio(){
   allStop();
   ctx = null;
   chain = null;
-  voices.clear();
+  voiceStore.clear();
   bufferCache = new WeakMap();
   try{
     previous?.close?.().catch (() => {
@@ -286,13 +227,13 @@ function releaseVoice(voice){
   }
 }
 function releaseAllVoices(except = null){
-  for (const group of voices.values()){
-    for (const voice of group)if (voice !== except)releaseVoice(voice);
-  }
+  voiceStore.forEach(voice => {
+    if (voice !== except)releaseVoice(voice);
+  });
 }
 function stopVoice(index){
   resetEditTransport(index);
-  for (const voice of voices.get(index) || [])releaseVoice(voice);
+  voiceStore.forEach(releaseVoice, index);
   renderVoiceLights()
 }
 function trigger(index, audition = false, options = {}){
@@ -348,11 +289,10 @@ function trigger(index, audition = false, options = {}){
     audio: p.audio,
     stopping: false
   };
-  if (!voices.has(index))voices.set(index, new Set());
-  voices.get(index).add(voice);
+  voiceStore.add(index, voice);
   if (editing)attachEditVoice(voice);
   source.onended = () => {
-    voices.get(index)?.delete(voice);
+    voiceStore.remove(index, voice);
     source.disconnect();
     gain.disconnect();
     finishEditVoice(voice);
@@ -392,160 +332,27 @@ function allStop(){
   renderVoiceLights()
 }
 
-// edit-transport.js
-// Transient editor transport. PCM, pad settings and saved snapshots remain unchanged.
-let editTransport = null;
-let editActionVersion = 0;
-let editSeek = null;
-
-function editRange(p = current()){
-  const duration = audioDuration(p);
-  return { start: p.start * duration, end: p.end * duration, duration };
-}
-function editSeekEnd(range){
-  // Playback cannot start at the exclusive trim end: retain one source frame.
-  return Math.max(range.start, range.end - 1 / current().audio.rate);
-}
-function editorTransport(){
-  const p = current();
-  if (!editTransport || editTransport.index !== slot() || editTransport.audio !== p.audio){
-    editTransport = { index: slot(), audio: p.audio, position: editRange(p).start, state: 'stopped', voice: null, pending: false };
-  }
-  return editTransport;
-}
-function editPositionSeconds(transport = editorTransport()){
-  return transport.voice && !transport.voice.stopping ? voicePositionSeconds(transport.voice) : transport.position;
-}
-function resetEditTransport(index){
-  if (editTransport?.index !== index)return;
-  leaveEditTransport();
-}
-function attachEditVoice(voice){
-  const transport = editorTransport();
-  transport.voice = voice;
-  transport.position = voice.offset;
-  transport.state = 'playing';
-  transport.pending = false;
-}
-function finishEditVoice(voice){
-  if (!voice.stopping && editTransport?.voice === voice){
-    editTransport.voice = null;
-    editTransport.state = 'stopped';
-    editTransport.position = editRange().start;
-  }
-}
-function leaveEditTransport(){
-  editActionVersion++;
-  editSeek = null;
-  editTransport = null;
-}
-function stopEditingPlayback(){
-  playEpoch++;
-  leaveEditTransport();
-  releaseAllVoices();
-  clearPerformanceHolds();
-}
-function enterEditTransport(){
-  const latest = latestActiveVoice(slot());
-  const position = latest ? voicePositionSeconds(latest) : editRange().start;
-  // Drop held performance gestures: editor preview is controlled by taps.
-  clearPerformanceHolds();
-  leaveEditTransport();
-  releaseAllVoices(latest);
-  if (!latest)return;
-  const range = editRange();
-  const inside = position >= range.start && position < range.end;
-  if (!latest.audition && !latest.source.loop && inside){
-    attachEditVoice(latest);
-  }else{
-    releaseVoice(latest);
-    trigger(slot(), false, { offset: inside ? position : range.start });
-  }
-}
-async function startEditFromCue(){
-  if (!canInteract() || uiMode !== 'edit' || !current().audio || editSeek)return;
-  const transport = editorTransport();
-  const index = slot();
-  const audio = current().audio;
-  const position = transport.position;
-  const version = ++editActionVersion;
-  const epoch = playEpoch;
-  transport.pending = true;
-  renderVoiceLights();
-  try{
-    // Keep resume inside the original trusted tap, including on iPhone.
-    await ensureAudio();
-    if (version !== editActionVersion || epoch !== playEpoch || uiMode !== 'edit' || slot() !== index || current().audio !== audio)return;
-    trigger(index, false, { offset: position });
-  }catch (e){
-    if (version === editActionVersion)notify(e.message);
-  }finally{
-    if (version === editActionVersion){
-      transport.pending = false;
-      renderVoiceLights();
-    }
-  }
-}
-function playEditPreview(index, toggle){
-  if (index !== slot() || uiMode !== 'edit' || !canInteract() || editSeek)return;
-  const transport = editorTransport();
-  if (toggle && (hasActiveVoice(index) || transport.pending)){
-    stopVoice(index);
-    return;
-  }
-  return startEditFromCue();
-}
-function pauseEditPlayback(){
-  const transport = editorTransport();
-  if (!transport.voice || transport.voice.stopping)return;
-  const voice = transport.voice;
-  transport.position = voicePositionSeconds(voice);
-  transport.voice = null;
-  transport.state = 'paused';
-  editActionVersion++;
-  releaseVoice(voice);
-  renderVoiceLights();
-}
-function toggleEditPlayback(){
-  if (!canInteract() || uiMode !== 'edit' || !current().audio || editSeek)return;
-  const transport = editorTransport();
-  if (transport.pending)return;
-  if (transport.state === 'playing')pauseEditPlayback();
-  else return startEditFromCue();
-}
-function canSeekEditPlayback(){
-  return uiMode === 'edit' && canInteract() && !!current().audio && !editorTransport().pending && !!playbackWaveDrawing && !playbackWaveFailedVoice;
-}
-function beginEditSeek(pointerId){
-  if (!canSeekEditPlayback() || editSeek)return false;
-  const transport = editorTransport();
-  const position = editPositionSeconds(transport);
-  const state = transport.state;
-  editActionVersion++;
-  // Capture the prior state first: dragging pauses sound until the gesture ends.
-  if (state === 'playing')pauseEditPlayback();
-  editSeek = { pointerId, transport, index: slot(), audio: current().audio, position, state };
-  syncPlaybackDisplay();
-  return true;
-}
-function setEditCue(seconds){
-  if (!editSeek || !Number.isFinite(seconds))return;
-  const transport = editorTransport();
-  if (transport !== editSeek.transport)return;
-  const range = editRange();
-  transport.position = clamp(seconds, range.start, editSeekEnd(range));
-  syncPlaybackDisplay();
-}
-function finishEditSeek(cancelled = false){
-  const seek = editSeek;
-  editSeek = null;
-  if (!seek || uiMode !== 'edit' || slot() !== seek.index || current().audio !== seek.audio || editTransport !== seek.transport)return;
-  const transport = seek.transport;
-  if (cancelled)transport.position = seek.position;
-  transport.state = seek.state === 'playing' ? 'paused' : seek.state;
-  if (seek.state === 'playing')return startEditFromCue();
-  syncPlaybackDisplay();
-}
+const editor = createEditTransport({
+  selection: { sample: current, slot, mode: () => uiMode, canInteract },
+  playback: {
+    epoch: () => playEpoch,
+    cancelPending: () => { playEpoch++; },
+    latestActiveVoice, voicePositionSeconds, releaseVoice, releaseAllVoices,
+    hasActiveVoice, stopVoice, trigger, ensureAudio
+  },
+  view: {
+    renderVoiceLights, syncPlaybackDisplay, notify,
+    hasWaveform: () => !!playbackWaveDrawing && !playbackWaveFailedVoice
+  },
+  clearPerformanceHolds
+});
+const {
+  editRange, editSeekEnd, editorTransport, editPositionSeconds,
+  resetEditTransport, attachEditVoice, finishEditVoice, leaveEditTransport,
+  stopEditingPlayback, enterEditTransport, startEditFromCue, playEditPreview,
+  pauseEditPlayback, toggleEditPlayback, canSeekEditPlayback,
+  beginEditSeek, setEditCue, finishEditSeek
+} = editor;
 
 // files.js
 function clearAudioImportTarget(){
@@ -603,7 +410,7 @@ async function importAudio(files, target){
     markSave(target);
     renderAll();
     await flushSave();
-    notify(BANKS[bank] + '.' + String(selected + 1).padStart(2, '0') + ' に取り込みました。' + (storageFailed ? '\nメニューからバックアップを保存してください。': '\n次回も自動復元します。'))
+    notify(BANKS[bank] + '.' + String(selected + 1).padStart(2, '0') + ' に取り込みました。' + (autosave.failed ? '\nメニューからバックアップを保存してください。': '\n次回も自動復元します。'))
   }catch (e){
     notify('取り込めませんでした。元の音源はそのままです。\n' + (e.name === 'EncodingError' ? '対応していない形式、または壊れた音声ファイルです。': e.message))
   }finally{
@@ -661,7 +468,7 @@ async function loadProject(file) {
     // Neither sound data nor current voices change before every validation succeeds.
     allStop();
     applyPreparedSettings(prepared.settings, prepared.sounds);
-    for (let index = 0; index < SLOT_COUNT; index++)dirtySounds.add(index);
+    autosave.markAllSounds();
     normalizeRanges();
     bufferCache = new WeakMap();
     updateMasterVolume();
@@ -669,7 +476,7 @@ async function loadProject(file) {
     busy(true, '復元した音源と設定を自動保存中…');
     markSave();
     await flushSave();
-    notify(storageFailed ? '復元しました。自動保存できないためバックアップも残してください。' : '音源と設定を復元しました。');
+    notify(autosave.failed ? '復元しました。自動保存できないためバックアップも残してください。' : '音源と設定を復元しました。');
   });
 }
 
@@ -903,7 +710,7 @@ function renderEditTransport(){
   const playing = transport.state === 'playing';
   const label = playing ? '再生を一時停止' : '選択音源を再生';
   renderPlaybackButton('pausePreview', 'pausePreviewLabel', 'pausePreviewIcon', playing ? '一時停止' : '再生', label, playing, playing ? 'pause' : 'play');
-  $('pausePreview').disabled = !current().audio || transport.pending || !!editSeek;
+  $('pausePreview').disabled = !current().audio || transport.pending || editor.isSeeking;
 }
 function renderWaveformPreference(){
   $('waveformToggleLabel').textContent = '波形表示：' + (showPlaybackWaveform ? 'オン' : 'オフ');
@@ -918,7 +725,7 @@ function renderEditSeekControl(){
   const graph = $('playbackWaveform');
   const seekable = canSeekEditPlayback();
   graph.classList.toggle('is-seekable', seekable);
-  graph.classList.toggle('is-seeking', !!editSeek);
+  graph.classList.toggle('is-seeking', editor.isSeeking);
   graph.setAttribute('role', seekable ? 'slider' : 'img');
   graph.tabIndex = seekable ? 0 : -1;
   graph.title = seekable ? 'タップ・ドラッグで再生位置を移動' : '';
@@ -1357,7 +1164,7 @@ function bindTrim(id, which) {
 function bindPlaybackSeek(){
   const graph = $('playbackWaveform');
   function move(e){
-    if (editSeek?.pointerId !== e.pointerId)return;
+    if (editor.seekPointerId !== e.pointerId)return;
     const rect = graph.getBoundingClientRect();
     if (rect.width > 0){
       const position = clamp((e.clientX - rect.left) / Math.max(1, rect.width - 2), 0, 1);
@@ -1373,12 +1180,12 @@ function bindPlaybackSeek(){
   });
   graph.addEventListener('pointermove', move);
   graph.addEventListener('pointerup', e => {
-    if (editSeek?.pointerId !== e.pointerId)return;
+    if (editor.seekPointerId !== e.pointerId)return;
     move(e);
     finishEditSeek();
   });
   for (const name of ['pointercancel', 'lostpointercapture'])graph.addEventListener(name, e => {
-    if (editSeek?.pointerId === e.pointerId)finishEditSeek(true);
+    if (editor.seekPointerId === e.pointerId)finishEditSeek(true);
   });
   graph.addEventListener('keydown', e => {
     if (!canSeekEditPlayback())return;
@@ -1622,7 +1429,7 @@ function bindLifecycleEvents() {
   window.addEventListener('focus', resumeAudio);
   window.addEventListener('pageshow', resumeAudio);
   window.addEventListener('beforeunload', e => {
-    if (saveInFlight || dirtySounds.size) {
+    if (autosave.inFlight || autosave.hasUnsavedAudio) {
       e.preventDefault();
       e.returnValue = ''
     }
@@ -1656,7 +1463,7 @@ function initializeSampler(){
 async function prepareAppUpdate() {
   if (!ready || isBusy())return false;
   await flushSave();
-  if (saveInFlight || needsSave || dirtySounds.size){
+  if (autosave.inFlight || autosave.pending){
     notify('音源と設定を保存できないため更新を中止しました。バックアップを保存してください。');
     return false;
   }
