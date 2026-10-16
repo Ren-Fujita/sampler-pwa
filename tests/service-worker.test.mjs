@@ -8,7 +8,7 @@ const source = await readFile(new URL('sw.js', root), 'utf8');
 const runtimeFiles = ['index.html', 'styles.css', 'pwa.js', 'manifest.webmanifest',
   'js/app.js', 'js/config.js', 'js/sample.js', 'js/presets.js', 'js/session.js',
   'js/session-storage.js', 'js/backup-codec.js', 'js/audio-utils.js',
-  'js/waveform.js', 'js/autosave.js', 'js/edit-transport.js', 'js/voice-store.js',
+  'js/waveform.js', 'js/master-volume.js', 'js/layout.js', 'js/autosave.js', 'js/edit-transport.js', 'js/voice-store.js',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png'];
 
 function environment(scope, brokenFile) {

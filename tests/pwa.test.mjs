@@ -11,6 +11,14 @@ function eventSource() {
   };
 }
 
+async function waitForOfflineStatus(elements) {
+  const deadline = Date.now() + 1000;
+  while (!elements.get('pwaStatus').textContent.includes('オフライン準備済み')) {
+    if (Date.now() >= deadline)throw Error('offline status did not become ready');
+    await delay(1);
+  }
+}
+
 async function environment(beforeUpdate, { supported = true, waiting = true } = {}) {
   const elements = new Map(['pwaStatus', 'checkAppUpdate', 'appUpdateLabel', 'appUpdateNote'].map(id => [id, { ...eventSource(), textContent: '', disabled: false }]));
   let reloads = 0;
@@ -26,7 +34,7 @@ async function environment(beforeUpdate, { supported = true, waiting = true } = 
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { getElementById: id => elements.get(id) } });
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true, ...(supported ? { serviceWorker } : {}) } });
   await initializePwa({ beforeUpdate });
-  await delay(5);
+  if (supported)await waitForOfflineStatus(elements);
   return {
     elements, serviceWorker, messages, reloads: () => reloads,
     click: () => elements.get('checkAppUpdate').emit('click'),
@@ -44,10 +52,12 @@ test('does not apply a waiting update automatically', async () => {
   try {
     assert(e.elements.get('pwaStatus').textContent.includes('オフライン準備済み'));
     assert.equal(e.elements.get('appUpdateLabel').textContent, '保存して更新を適用');
+    e.elements.get('pwaStatus').textContent = '';
     e.serviceWorker.emit('controllerchange');
     assert.deepEqual(e.messages, []);
     assert.equal(e.reloads(), 0);
-    await delay(5);
+    // Controller changes check the cache through another asynchronous message.
+    await waitForOfflineStatus(e.elements);
   } finally { e.restore(); }
 });
 

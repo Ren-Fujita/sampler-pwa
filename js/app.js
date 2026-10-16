@@ -1,3 +1,5 @@
+import { createMasterVolume } from './master-volume.js';
+import { createLayout } from './layout.js';
 import { createAutosave } from './autosave.js';
 import { createEditTransport } from './edit-transport.js';
 import { createVoiceStore } from './voice-store.js';
@@ -16,8 +18,6 @@ const $ = id => document.getElementById(id);
 let pads = Array.from({ length: SLOT_COUNT }, createEmptySample);
 let bank = 0;
 let selected = 0;
-let master = .75;
-let lastVolume = .75;
 let uiMode = 'play';
 let showPlaybackWaveform = true;
 
@@ -48,6 +48,16 @@ let chooserPending = false;
 let panel = null;
 let toastTimer;
 
+const masterVolume = createMasterVolume({
+  getElements: () => ({ input: $('volume'), output: $('volumeOut'), mute: $('mute'), waves: $('speakerWaves') }),
+  applyGain: value => {
+    if (chain)chain.master.gain.setValueAtTime(value, ctx.currentTime);
+  },
+  onChange: () => markSave()
+});
+const renderVolume = masterVolume.render;
+const updateMasterVolume = masterVolume.applyToAudio;
+
 const slot = () => bank * PAD_COUNT + selected;
 const current = () => pads[slot()];
 const isBusy = () => document.body.classList.contains('busy');
@@ -68,7 +78,7 @@ function snapshot(){
     selected,
     tempo,
     swing,
-    master,
+    master: masterVolume.value,
     showPlaybackWaveform,
     fx,
     fxValues: fxValues.slice(),
@@ -121,7 +131,7 @@ function applyPreparedSettings(s, sounds = pads.map(p => p.audio)){
   selected = s.selected;
   tempo = s.tempo;
   swing = s.swing;
-  master = s.master;
+  masterVolume.restore(s.master);
   showPlaybackWaveform = s.showPlaybackWaveform;
   fx = s.fx;
   fxValues = s.fxValues;
@@ -136,9 +146,6 @@ const hasActiveVoice = voiceStore.hasActive;
 const latestActiveVoice = voiceStore.latestActive;
 const getVoiceActivity = voiceStore.activity;
 
-function updateMasterVolume(){
-  if (chain)chain.master.gain.setTargetAtTime(master, ctx.currentTime, .015)
-}
 function getAudioContext(){
   if (!ctx || ctx.state === 'closed'){
     const Audio = window.AudioContext || window.webkitAudioContext;
@@ -146,7 +153,7 @@ function getAudioContext(){
     ctx = new Audio({
       latencyHint: 'interactive'
     });
-    chain = createChain(ctx, ctx.destination, master);
+    chain = createChain(ctx, ctx.destination, masterVolume.value);
     ctx.addEventListener('statechange', renderVoiceLights)
   }
   return ctx
@@ -192,7 +199,7 @@ async function recoverAudio(){
   if (panel)closePanel();
   try{
     await ensureAudio();
-    notify(master === 0 ? '音声を準備し直しました。全体音量が0%です。右のVolumeバーを上げてください。': '音声を準備し直しました。再生モードでパッドを押してください。')
+    notify(masterVolume.value === 0 ? '音声を準備し直しました。全体音量が0%です。右のVolumeバーを上げてください。': '音声を準備し直しました。再生モードでパッドを押してください。')
   }catch (e){
     notify(e.message)
   }
@@ -515,13 +522,6 @@ function activatePad(i) {
   if (uiMode === 'import')openImport(index);
   else if (uiMode === 'play')playPad(index)
 }
-function setVolume(value) {
-  master = clamp(Number(value), 0, 1);
-  if (master > 0)lastVolume = master;
-  updateMasterVolume();
-  renderVolume();
-  markSave()
-}
 function togglePlaybackWaveform() {
   if (!ready || isBusy())return;
   showPlaybackWaveform = !showPlaybackWaveform;
@@ -739,16 +739,6 @@ function renderEditSeekControl(){
   }else{
     for (const name of ['aria-orientation', 'aria-valuemin', 'aria-valuemax', 'aria-valuenow', 'aria-valuetext'])graph.removeAttribute(name);
   }
-}
-function renderVolume(){
-  if (master > 0)lastVolume = master;
-  $('volume').value = Math.round(master * 100);
-  $('volume').style.setProperty('--fill', master * 100 + '%');
-  $('volumeOut').textContent = Math.round(master * 100) + '%';
-  $('mute').classList.toggle('muted', master === 0);
-  $('mute').setAttribute('aria-pressed', String(master === 0));
-  $('mute').setAttribute('aria-label', master === 0 ? 'ミュートを解除': 'ミュート');
-  $('speakerWaves').setAttribute('d', master === 0 ? 'M17 9l5 6m0-6-5 6': 'M17 8c3 2 3 6 0 8m3-11c5 4 5 10 0 14')
 }
 function renderEditor(){
   if (uiMode !== 'edit')return;
@@ -1281,50 +1271,14 @@ function bindKeyboardEvents() {
   });
 }
 
-// layout.js
-function fitPads(){
-  const grid = $('pads'),
-  height = grid.clientHeight || grid.getBoundingClientRect().height;
-  if (!height)return;
-  const style = window.getComputedStyle?.(grid),
-  frame = parseFloat(style?.getPropertyValue('--pad-frame-space')) || 46,
-  rowHeight = (height - frame) / 3;
-  grid.dataset.density = rowHeight >= 100 ? 'full': rowHeight >= 58 ? 'compact': rowHeight >= 40 ? 'short': rowHeight >= 24 ? 'minimal': 'micro';
-  grid.style.setProperty('--pad-number-size', Math.max(8, Math.min(12, Math.floor(rowHeight - 4))) + 'px')
-}
-function fitViewport(){
-  const viewport = window.visualViewport,
-  width = viewport?.width || window.innerWidth,
-  height = viewport?.height || window.innerHeight;
-  if (!width || !height)return;
-  const style = document.documentElement.style;
-  style.setProperty('--viewport-width', width + 'px');
-  style.setProperty('--viewport-height', height + 'px');
-  style.setProperty('--viewport-top', (viewport?.offsetTop || 0) + 'px');
-  style.setProperty('--viewport-left', (viewport?.offsetLeft || 0) + 'px');
-  $('device').classList.toggle('compact', height <= 620);
-  $('device').classList.toggle('landscape', height <= 540 && width >= 640);
-  $('device').classList.toggle('short-portrait', height < 480 && width < 640);
-  fitPads();
-  syncPlaybackDisplay();
-}
-function bindLayoutEvents(){
-  window.addEventListener('resize', fitViewport);
-  if (window.visualViewport){
-    window.visualViewport.addEventListener('resize', fitViewport);
-    window.visualViewport.addEventListener('scroll', fitViewport)
-  }
-  if (window.ResizeObserver){
-    const layoutObserver = new ResizeObserver(() => {
-      drawWave();
-      fitPads();
-      syncPlaybackDisplay();
-    });
-    layoutObserver.observe($('waveZone'));
-    layoutObserver.observe($('pads'));
-    layoutObserver.observe($('headerDisplay'));
-  }
-}
+// Layout owns sizing and browser resize subscriptions.
+const { fitPads, fitViewport, bind: bindLayoutEvents } = createLayout({
+  getWindow: () => window,
+  getDocument: () => document,
+  getElement: $,
+  drawWave,
+  syncPlaybackDisplay
+});
 
 // events.js
 function bindModeControls() {
@@ -1345,8 +1299,7 @@ function bindModeControls() {
   }
 }
 function bindPlaybackControls() {
-  $('volume').oninput = e => setVolume(Number(e.target.value) / 100);
-  $('mute').onclick = () => setVolume(master === 0 ? lastVolume: 0);
+  masterVolume.bind();
   for (const flag of PLAYBACK_FLAGS)$(flag).onclick = () => updateSample(p => {
     p[flag] = !p[flag]
   });
@@ -1454,7 +1407,6 @@ function initializeSampler(){
   renderAll();
   busy(true, '保存した音源を復元中…');
   restore().finally(() => {
-    lastVolume = master > 0 ? master: .75;
     renderVolume();
     busy(false)
   });
